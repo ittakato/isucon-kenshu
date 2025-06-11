@@ -266,13 +266,15 @@ def nl2br(eval_ctx, value):
         result = Markup(result)
     return result
 
+
 # add cache to static files
 @app.after_request
 def add_cache_control(response):
     # 静的ファイルに対してキャッシュヘッダーを追加
     if response.status_code == 200 and response.mimetype.startswith("image/"):
-        response.headers["Cache-Control"] = "public, max-age=3153600"  
+        response.headers["Cache-Control"] = "public, max-age=3153600"
     return response
+
 
 # endpoints
 
@@ -436,13 +438,15 @@ def get_user_list(account_name):
     )
 
 
-def _parse_iso8601(s):
-    # http://bugs.python.org/issue15873
-    # Ignore timezone
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[ tT](\d{2}):(\d{2}):(\d{2}).*", s)
-    if not m:
-        raise ValueError("Invlaid iso8601 format: %r" % (s,))
-    return datetime.datetime(*map(int, m.groups()))
+def _parse_iso8601(s: str) -> datetime.datetime:
+    try:
+        # Slice the string to its first 19 characters (the YYYY-MM-DDTHH:MM:SS part)
+        # and pass it to the highly optimized fromisoformat parser.
+        return datetime.datetime.fromisoformat(s[:19])
+    except (ValueError, TypeError, IndexError):
+        # Catch potential errors for invalid or too-short strings
+        # and raise a ValueError consistent with the original function.
+        raise ValueError(f"Invalid iso8601 format: {s!r}")
 
 
 @app.route("/posts")
