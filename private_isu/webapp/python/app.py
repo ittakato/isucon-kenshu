@@ -127,62 +127,39 @@ def get_session_user():
 
 
 def make_posts(results, all_comments=False):
-    if not results:
-        return []
-
-    post_ids = [post["id"] for post in results]
-    posts_by_id = {post["id"]: post for post in results}
-
-    # Fetch users for all posts at once
-    user_ids = {post["user_id"] for post in results}
-    cursor = db().cursor()
-    if user_ids:
-        cursor.execute("SELECT * FROM `users` WHERE `id` IN %s", (list(user_ids),))
-        users = {user["id"]: user for user in cursor.fetchall()}
-        for post_id in posts_by_id:
-            if posts_by_id[post_id]["user_id"] in users:
-                posts_by_id[post_id]["user"] = users[posts_by_id[post_id]["user_id"]]
-
-    # Fetch comment counts for all posts at once
-    cursor.execute(
-        "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN %s GROUP BY `post_id`",
-        (post_ids,),
-    )
-    for row in cursor.fetchall():
-        posts_by_id[row["post_id"]]["comment_count"] = row["count"]
-
-    # Fetch comments and their users for all posts at once
-    query = """
-        SELECT c.*, u.account_name, u.del_flg
-        FROM `comments` c
-        JOIN `users` u ON c.user_id = u.id
-        WHERE c.post_id IN %s
-        ORDER BY c.created_at DESC
-    """
-    cursor.execute(query, (post_ids,))
-    comments_by_post_id = {pid: [] for pid in post_ids}
-    for comment in cursor.fetchall():
-        comment["user"] = {
-            "account_name": comment["account_name"],
-            "del_flg": comment["del_flg"],
-        }
-        comments_by_post_id[comment["post_id"]].append(comment)
-
     posts = []
+    cursor = db().cursor()
     for post in results:
-        post_comments = comments_by_post_id.get(post["id"], [])
-        post_comments.reverse()
-        if not all_comments:
-            post["comments"] = post_comments[:3]
-        else:
-            post["comments"] = post_comments
+        cursor.execute(
+            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
+            (post["id"],),
+        )
+        post["comment_count"] = cursor.fetchone()["count"]
 
-        if not post.get("user") or not post["user"]["del_flg"]:
+        query = (
+            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
+        )
+        if not all_comments:
+            query += " LIMIT 3"
+
+        cursor.execute(query, (post["id"],))
+        comments = list(cursor)
+        for comment in comments:
+            cursor.execute(
+                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
+            )
+            comment["user"] = cursor.fetchone()
+        comments.reverse()
+        post["comments"] = comments
+
+        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
+        post["user"] = cursor.fetchone()
+
+        if not post["user"]["del_flg"]:
             posts.append(post)
 
         if len(posts) >= POSTS_PER_PAGE:
             break
-
     return posts
 
 
@@ -226,6 +203,11 @@ def nl2br(eval_ctx, value):
         result = Markup(result)
     return result
 
+# Cache-Control header for static files
+@app.after_request
+def add_header(response):
+    response.headers["Cache-Control"] = "public, max-age=31536000"
+    return response
 
 # endpoints
 
