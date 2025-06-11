@@ -306,7 +306,7 @@ def get_user_list(account_name):
     )
     user = cursor.fetchone()
     if user is None:
-        flask.abort(404)  # raises exception
+        flask.abort(404)
 
     cursor.execute(
         "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = %s ORDER BY `created_at` DESC",
@@ -315,21 +315,15 @@ def get_user_list(account_name):
     posts = make_posts(cursor.fetchall())
 
     cursor.execute(
-        "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = %s", (user["id"],)
+        """
+        SELECT
+            (SELECT COUNT(*) FROM `posts` WHERE `user_id` = %s) AS post_count,
+            (SELECT COUNT(*) FROM `comments` WHERE `user_id` = %s) AS comment_count,
+            (SELECT COUNT(*) FROM `comments` WHERE `post_id` IN (SELECT `id` FROM `posts` WHERE `user_id` = %s)) AS commented_count
+        """,
+        (user["id"], user["id"], user["id"]),
     )
-    comment_count = cursor.fetchone()["count"]
-
-    cursor.execute("SELECT `id` FROM `posts` WHERE `user_id` = %s", (user["id"],))
-    post_ids = [p["id"] for p in cursor]
-    post_count = len(post_ids)
-
-    commented_count = 0
-    if post_count > 0:
-        cursor.execute(
-            "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN %s",
-            (post_ids,),
-        )
-        commented_count = cursor.fetchone()["count"]
+    counts = cursor.fetchone()
 
     me = get_session_user()
 
@@ -337,12 +331,11 @@ def get_user_list(account_name):
         "user.html",
         posts=posts,
         user=user,
-        post_count=post_count,
-        comment_count=comment_count,
-        commented_count=commented_count,
+        post_count=counts["post_count"],
+        comment_count=counts["comment_count"],
+        commented_count=counts["commented_count"],
         me=me,
     )
-
 
 def _parse_iso8601(s):
     # http://bugs.python.org/issue15873
