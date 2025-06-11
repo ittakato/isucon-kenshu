@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import os
 import pathlib
 import re
@@ -12,7 +13,6 @@ from flask_session import Session
 from jinja2 import pass_eval_context
 from markupsafe import Markup, escape
 from pymemcache.client.base import Client as MemcacheClient
-import hashlib
 
 UPLOAD_LIMIT = 10 * 1024 * 1024  # 10mb
 POSTS_PER_PAGE = 20
@@ -110,7 +110,13 @@ def validate_user(account_name: str, password: str):
 
 
 def digest(src: str):
-    return hashlib.sha512(src.encode("utf-8")).hexdigest()
+    # opensslのバージョンによっては (stdin)= というのがつくので取る
+    out = subprocess.check_output(
+        f"printf %s {shlex.quote(src)} | openssl dgst -sha512 | sed 's/^.*= //'",
+        shell=True,
+        encoding="utf-8",
+    )
+    return out.strip()
 
 
 def calculate_salt(account_name: str):
@@ -141,6 +147,7 @@ def get_session_user():
         return user_data
     return None
 
+
 def make_posts(results, all_comments=False):
     if not results:
         return []
@@ -164,7 +171,7 @@ def make_posts(results, all_comments=False):
     # コメント数を一括取得
     cursor.execute(
         "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN %s GROUP BY `post_id`",
-        (post_ids,)
+        (post_ids,),
     )
     comment_counts = {row["post_id"]: row["count"] for row in cursor.fetchall()}
 
@@ -172,7 +179,7 @@ def make_posts(results, all_comments=False):
     comment_limit = "LIMIT 3" if not all_comments else ""
     cursor.execute(
         f"SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `created_at` DESC {comment_limit}",
-        (post_ids,)
+        (post_ids,),
     )
     comments_by_post = {}
     for comment in cursor.fetchall():
@@ -322,6 +329,7 @@ def get_index():
     posts = make_posts(cursor.fetchall())
 
     return flask.render_template("index.html", posts=posts, me=me)
+
 
 @app.route("/@<account_name>")
 def get_user_list(account_name):
