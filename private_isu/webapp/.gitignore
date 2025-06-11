@@ -1,0 +1,26 @@
+# Ignore common operating system generated files
+.DS_Store
+Thumbs.db
+
+# Python specific ignores
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+.Python
+env/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Ignore all other language directories
+/golang/
+/node/
+/php/
+/public/
+/ruby/
+
+# Ignore docker-compose.yml if you're not using it or managing it separately
+# docker-compose.yml
