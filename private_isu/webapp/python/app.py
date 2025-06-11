@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+from collections import defaultdict
 
 import flask
 import MySQLdb.cursors
@@ -126,36 +127,95 @@ def get_session_user():
     return None
 
 
-def make_posts(results, all_comments=False):
-    posts = []
+BATCH_META_SQL = """
+  SELECT
+    p.id           AS post_id,
+    u.id           AS user_id,
+    u.account_name AS account_name,
+    u.del_flg      AS user_del_flg,
+    COUNT(c.id)    AS comment_count
+  FROM posts p
+  JOIN users u
+    ON u.id = p.user_id
+   AND u.del_flg = 0
+  LEFT JOIN comments c
+    ON c.post_id = p.id
+  WHERE p.id IN %s
+  GROUP BY p.id, u.id, u.account_name, u.del_flg
+"""
+
+BATCH_COMMENTS_SQL = """
+  SELECT
+    c.post_id,
+    c.id,
+    c.comment,
+    c.user_id,
+    u.account_name   AS commenter_name,
+    u.del_flg        AS commenter_del_flg,
+    c.created_at
+  FROM comments c
+  JOIN users u
+    ON u.id = c.user_id
+  WHERE c.post_id IN %s
+  ORDER BY c.created_at DESC
+"""
+
+
+def make_posts(raw_posts):
+    if not raw_posts:
+        return []
+
+    post_ids = [p["id"] for p in raw_posts]
     cursor = db().cursor()
-    for post in results:
-        cursor.execute(
-            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
-            (post["id"],),
+
+    # 1) batch author + count
+    cursor.execute(BATCH_META_SQL, (post_ids,))
+    meta_by_post = {
+        row["post_id"]: {
+            "user": {
+                "id": row["user_id"],
+                "account_name": row["account_name"],
+                "del_flg": row["user_del_flg"],
+            },
+            "comment_count": row["comment_count"],
+        }
+        for row in cursor.fetchall()
+    }
+
+    # 2) batch fetch comments
+    cursor.execute(BATCH_COMMENTS_SQL, (post_ids,))
+    comments_by_post = defaultdict(list)
+    for cm in cursor.fetchall():
+        comments_by_post[cm["post_id"]].append(
+            {
+                "id": cm["id"],
+                "comment": cm["comment"],
+                "user": {
+                    "account_name": cm["commenter_name"],
+                    "del_flg": cm["commenter_del_flg"],
+                },
+                "created_at": cm["created_at"],
+            }
         )
-        post["comment_count"] = cursor.fetchone()["count"]
 
-        query = (
-            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
-        )
-        if not all_comments:
-            query += " LIMIT 3"
+    # 3) build final list
+    posts = []
+    for post in raw_posts:
+        meta = meta_by_post.get(post["id"])
+        if not meta:
+            continue  # skip deleted author or missing meta
 
-        cursor.execute(query, (post["id"],))
-        comments = list(cursor)
-        for comment in comments:
-            cursor.execute(
-                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
-            )
-            comment["user"] = cursor.fetchone()
-        comments.reverse()
-        post["comments"] = comments
+        # attach author & count
+        post["user"] = meta["user"]
+        post["comment_count"] = meta["comment_count"]
 
-        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
-        post["user"] = cursor.fetchone()
+        # take the 3 most recent comments in chronological order
+        cms = comments_by_post.get(post["id"], [])
+        cms.reverse()  # now oldest→newest
+        post["comments"] = cms[-3:]
 
-        if not post["user"]["del_flg"]:
+        # only include if author isn’t deleted
+        if post["user"]["del_flg"] == 0:
             posts.append(post)
 
         if len(posts) >= POSTS_PER_PAGE:
@@ -336,6 +396,7 @@ def get_user_list(account_name):
         commented_count=counts["commented_count"],
         me=me,
     )
+
 
 def _parse_iso8601(s):
     # http://bugs.python.org/issue15873
