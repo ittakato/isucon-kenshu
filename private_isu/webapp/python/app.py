@@ -360,7 +360,7 @@ def _parse_iso8601(s):
 @app.route("/posts")
 def get_posts():
     cursor = db().cursor()
-    max_created_at = flask.request.args["max_created_at"] or None
+    max_created_at = flask.request.args.get("max_created_at") or None
     if max_created_at:
         max_created_at = _parse_iso8601(max_created_at)
         cursor.execute(
@@ -369,7 +369,7 @@ def get_posts():
         )
     else:
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE ORDER BY `created_at` DESC"
+            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC"
         )
     results = cursor.fetchall()
     posts = make_posts(results)
@@ -480,7 +480,7 @@ def post_comment():
 def get_banned():
     me = get_session_user()
     if not me:
-        flask.redirect("/login")
+        return flask.redirect("/login")
 
     if me["authority"] == 0:
         flask.abort(403)
@@ -491,14 +491,14 @@ def get_banned():
     )
     users = cursor.fetchall()
 
-    flask.render_template("banned.html", users=users, me=me)
+    return flask.render_template("banned.html", users=users, me=me)
 
 
 @app.route("/admin/banned", methods=["POST"])
 def post_banned():
     me = get_session_user()
     if not me:
-        flask.redirect("/login")
+        return flask.redirect("/login")
 
     if me["authority"] == 0:
         flask.abort(403)
