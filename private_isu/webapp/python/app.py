@@ -127,93 +127,39 @@ def get_session_user():
 
 
 def make_posts(results, all_comments=False):
-    if not results:
-        return []
-    
     posts = []
     cursor = db().cursor()
-    
-    # 投稿IDとユーザIDのリストを取得
-    post_ids = [post["id"] for post in results]
-    user_ids = list(set(post["user_id"] for post in results))
-    
-    # ユーザ情報を一括取得
-    users_data = {}
-    if user_ids:
-        placeholders = ",".join(["%s"] * len(user_ids))
-        cursor.execute(f"SELECT * FROM `users` WHERE `id` IN ({placeholders})", user_ids)
-        users_data = {user["id"]: user for user in cursor.fetchall()}
-    
-    # コメント数を一括取得
-    comment_counts = {}
-    if post_ids:
-        placeholders = ",".join(["%s"] * len(post_ids))
-        cursor.execute(f"SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN ({placeholders}) GROUP BY `post_id`", post_ids)
-        comment_counts = {row["post_id"]: row["count"] for row in cursor.fetchall()}
-    
-    # コメント一覧を一括取得
-    comments_data = {}
-    if post_ids:
-        placeholders = ",".join(["%s"] * len(post_ids))
-        if all_comments:
-            cursor.execute(f"SELECT * FROM `comments` WHERE `post_id` IN ({placeholders}) ORDER BY `created_at` DESC", post_ids)
-        else:
-            # ウィンドウ関数を使用して各投稿の最新3件のコメントを取得
-            cursor.execute(f"""
-                SELECT * FROM (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) as rn 
-                    FROM `comments` 
-                    WHERE `post_id` IN ({placeholders})
-                ) ranked 
-                WHERE rn <= 3 
-                ORDER BY `post_id`, `created_at` DESC
-            """, post_ids)
-        
-        comment_user_ids = set()
-        for comment in cursor.fetchall():
-            post_id = comment["post_id"]
-            if post_id not in comments_data:
-                comments_data[post_id] = []
-            comments_data[post_id].append(comment)
-            comment_user_ids.add(comment["user_id"])
-        
-        # コメントユーザ情報を一括取得（まだ取得していないユーザのみ）
-        new_user_ids = comment_user_ids - set(users_data.keys())
-        if new_user_ids:
-            placeholders = ",".join(["%s"] * len(new_user_ids))
-            cursor.execute(f"SELECT * FROM `users` WHERE `id` IN ({placeholders})", list(new_user_ids))
-            for user in cursor.fetchall():
-                users_data[user["id"]] = user
-    
-    # 投稿データを構築
     for post in results:
-        post_id = post["id"]
-        user_id = post["user_id"]
-        
-        # コメント数を設定
-        post["comment_count"] = comment_counts.get(post_id, 0)
-        
-        # コメント一覧を設定
-        comments = comments_data.get(post_id, [])
-        for comment in comments:
-            comment["user"] = users_data.get(comment["user_id"])
-        
-        # コメントの順序を調整（古い順に）
+        cursor.execute(
+            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
+            (post["id"],),
+        )
+        post["comment_count"] = cursor.fetchone()["count"]
+
+        query = (
+            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
+        )
         if not all_comments:
-            comments.reverse()
+            query += " LIMIT 3"
+
+        cursor.execute(query, (post["id"],))
+        comments = list(cursor)
+        for comment in comments:
+            cursor.execute(
+                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
+            )
+            comment["user"] = cursor.fetchone()
+        comments.reverse()
         post["comments"] = comments
-        
-        # 投稿ユーザ情報を設定
-        post["user"] = users_data.get(user_id)
-        
-        # 削除されていないユーザの投稿のみ追加
-        if post["user"] and not post["user"]["del_flg"]:
+
+        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
+        post["user"] = cursor.fetchone()
+
+        if not post["user"]["del_flg"]:
             posts.append(post)
-        
-        # 投稿数の制限
+
         if len(posts) >= POSTS_PER_PAGE:
             break
-    
     return posts
 
 
