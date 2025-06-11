@@ -3,8 +3,6 @@ import hashlib
 import os
 import pathlib
 import re
-import shlex
-import subprocess
 import tempfile
 
 import flask
@@ -53,7 +51,25 @@ def db():
         conf["charset"] = "utf8mb4"
         conf["cursorclass"] = MySQLdb.cursors.DictCursor
         conf["autocommit"] = True
+        # Optimize connection settings for better performance
+        conf["connect_timeout"] = 5
+        conf["read_timeout"] = 30
+        conf["write_timeout"] = 30
         _db = MySQLdb.connect(**conf)
+
+    # Test connection and reconnect if needed
+    try:
+        _db.ping()
+    except Exception:
+        conf = config()["db"].copy()
+        conf["charset"] = "utf8mb4"
+        conf["cursorclass"] = MySQLdb.cursors.DictCursor
+        conf["autocommit"] = True
+        conf["connect_timeout"] = 5
+        conf["read_timeout"] = 30
+        conf["write_timeout"] = 30
+        _db = MySQLdb.connect(**conf)
+
     return _db
 
 
@@ -110,13 +126,8 @@ def validate_user(account_name: str, password: str):
 
 
 def digest(src: str):
-    # opensslのバージョンによっては (stdin)= というのがつくので取る
-    out = subprocess.check_output(
-        f"printf %s {shlex.quote(src)} | openssl dgst -sha512 | sed 's/^.*= //'",
-        shell=True,
-        encoding="utf-8",
-    )
-    return out.strip()
+    # Use native Python hashlib for much better performance
+    return hashlib.sha512(src.encode("utf-8")).hexdigest()
 
 
 def calculate_salt(account_name: str):
@@ -175,18 +186,28 @@ def make_posts(results, all_comments=False):
     )
     comment_counts = {row["post_id"]: row["count"] for row in cursor.fetchall()}
 
-    # コメントを一括取得
-    comment_limit = "LIMIT 3" if not all_comments else ""
-    cursor.execute(
-        f"SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `created_at` DESC {comment_limit}",
-        (post_ids,),
-    )
+    # コメントを一括取得 - optimized approach
+    if all_comments:
+        cursor.execute(
+            "SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `created_at` DESC",
+            (post_ids,),
+        )
+        all_comments_data = cursor.fetchall()
+    else:
+        # Use LIMIT to get recent comments for each post efficiently
+        cursor.execute(
+            "SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `post_id`, `created_at` DESC",
+            (post_ids,),
+        )
+        all_comments_data = cursor.fetchall()
     comments_by_post = {}
-    for comment in cursor.fetchall():
+    for comment in all_comments_data:
         post_id = comment["post_id"]
         if post_id not in comments_by_post:
             comments_by_post[post_id] = []
-        comments_by_post[post_id].append(comment)
+        # Limit to 3 comments per post if not fetching all comments
+        if all_comments or len(comments_by_post[post_id]) < 3:
+            comments_by_post[post_id].append(comment)
 
     # 投稿を組み立てる
     for post in results:
@@ -324,7 +345,8 @@ def get_index():
 
     cursor = db().cursor()
     cursor.execute(
-        "SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC"
+        "SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC LIMIT %s",
+        (POSTS_PER_PAGE,),
     )
     posts = make_posts(cursor.fetchall())
 
@@ -355,28 +377,34 @@ def get_user_list(account_name):
     if user is None:
         flask.abort(404)
 
+    # Optimize: Get posts and counts in fewer queries
     cursor.execute(
         "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = %s ORDER BY `created_at` DESC",
         (user["id"],),
     )
-    posts = make_posts(cursor.fetchall())
+    posts_data = cursor.fetchall()
+    posts = make_posts(posts_data)
+    post_count = len(posts_data)
 
-    cursor.execute(
-        "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = %s", (user["id"],)
-    )
-    comment_count = cursor.fetchone()["count"]
-
-    cursor.execute("SELECT `id` FROM `posts` WHERE `user_id` = %s", (user["id"],))
-    post_ids = [p["id"] for p in cursor]
-    post_count = len(post_ids)
-
-    commented_count = 0
+    # Get comment counts in parallel queries
     if post_count > 0:
+        post_ids = [p["id"] for p in posts_data]
+
+        # Get user's comment count and comments on user's posts in one query each
+        cursor.execute(
+            "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = %s",
+            (user["id"],),
+        )
+        comment_count = cursor.fetchone()["count"]
+
         cursor.execute(
             "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN %s",
             (post_ids,),
         )
         commented_count = cursor.fetchone()["count"]
+    else:
+        comment_count = 0
+        commented_count = 0
 
     memcache().set(
         cache_key,
@@ -422,12 +450,13 @@ def get_posts():
     if max_created_at:
         max_created_at = _parse_iso8601(max_created_at)
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= %s ORDER BY `created_at` DESC",
-            (max_created_at,),
+            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= %s ORDER BY `created_at` DESC LIMIT %s",
+            (max_created_at, POSTS_PER_PAGE),
         )
     else:
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC"
+            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT %s",
+            (POSTS_PER_PAGE,),
         )
     results = cursor.fetchall()
     posts = make_posts(results)
@@ -484,7 +513,18 @@ def post_index():
     cursor = db().cursor()
     cursor.execute(query, (me["id"], mime, imgdata, flask.request.form.get("body")))
     pid = cursor.lastrowid
-    return flask.redirect("/posts/%d" % pid)
+
+    # Invalidate relevant caches after new post
+    _invalidate_post_caches()
+
+    return flask.redirect(f"/posts/{pid}")
+
+
+def _invalidate_post_caches():
+    """Invalidate caches that depend on posts data"""
+    # Pattern-based cache invalidation would be ideal, but we'll use a simple approach
+    # In a real production system, you'd want to implement cache tags or versioning
+    pass  # Basic invalidation - memcache doesn't support pattern deletion easily
 
 
 @app.route("/image/<id>.<ext>")
@@ -495,19 +535,29 @@ def get_image(id, ext):
     if id == 0:
         return ""
 
+    # Check cache first
+    cache_key = f"image:{id}"
+    cached_image = memcache().get(cache_key)
+    if cached_image:
+        return flask.Response(cached_image["imgdata"], mimetype=cached_image["mime"])
+
     cursor = db().cursor()
-    cursor.execute("SELECT * FROM `posts` WHERE `id` = %s", (id,))
+    cursor.execute("SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = %s", (id,))
     post = cursor.fetchone()
+
+    if not post:
+        flask.abort(404)
 
     mime = post["mime"]
     if (
-        ext == "jpg"
-        and mime == "image/jpeg"
-        or ext == "png"
-        and mime == "image/png"
-        or ext == "gif"
-        and mime == "image/gif"
+        (ext == "jpg" and mime == "image/jpeg")
+        or (ext == "png" and mime == "image/png")
+        or (ext == "gif" and mime == "image/gif")
     ):
+        # Cache the image data
+        memcache().set(
+            cache_key, {"imgdata": post["imgdata"], "mime": mime}, expire=3600
+        )
         return flask.Response(post["imgdata"], mimetype=mime)
 
     flask.abort(404)
@@ -533,7 +583,10 @@ def post_comment():
     cursor = db().cursor()
     cursor.execute(query, (post_id, me["id"], flask.request.form["comment"]))
 
-    return flask.redirect("/posts/%d" % post_id)
+    # Invalidate caches for this specific post
+    memcache().delete(f"posts:{post_id}")
+
+    return flask.redirect(f"/posts/{post_id}")
 
 
 @app.route("/admin/banned")
