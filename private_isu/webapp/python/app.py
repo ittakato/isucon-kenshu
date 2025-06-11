@@ -433,37 +433,19 @@ def get_image(id, ext):
     if id == 0:
         return ""
 
-    # キャッシュキーを生成
-    cache_key = f"image:{id}:{ext}"
-    cached_image = memcache().get(cache_key)
-
-    # キャッシュが存在する場合はそれを返す
-    if cached_image and "imgdata" in cached_image and "mime" in cached_image:
-        return flask.Response(cached_image["imgdata"], mimetype=cached_image["mime"])
-
-    # データベースから画像データを取得
     cursor = db().cursor()
-    cursor.execute("SELECT `mime`, `imgdata` FROM `posts` WHERE `id` = %s", (id,))
+    cursor.execute("SELECT * FROM `posts` WHERE `id` = %s", (id,))
     post = cursor.fetchone()
 
-    if not post:
-        flask.abort(404)
-
     mime = post["mime"]
-    valid_mime_types = {
-        "jpg": "image/jpeg",
-        "png": "image/png",
-        "gif": "image/gif",
-    }
-
-    # MIMEタイプと拡張子が一致する場合のみ処理
-    if valid_mime_types.get(ext) == mime:
-        # キャッシュに保存
-        memcache().set(
-            cache_key,
-            {"imgdata": post["imgdata"], "mime": mime},
-            expire=3600,  # キャッシュ期限を1時間に設定
-        )
+    if (
+        ext == "jpg"
+        and mime == "image/jpeg"
+        or ext == "png"
+        and mime == "image/png"
+        or ext == "gif"
+        and mime == "image/gif"
+    ):
         return flask.Response(post["imgdata"], mimetype=mime)
 
     flask.abort(404)
