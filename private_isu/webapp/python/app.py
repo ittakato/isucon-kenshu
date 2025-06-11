@@ -83,6 +83,11 @@ def memcache():
 
 
 def try_login(account_name, password):
+    cache_key = f"login:{account_name}"
+    cached_user = memcache().get(cache_key)
+    if cached_user:
+        return cached_user
+
     cur = db().cursor()
     cur.execute(
         "SELECT * FROM users WHERE account_name = %s AND del_flg = 0", (account_name,)
@@ -90,6 +95,7 @@ def try_login(account_name, password):
     user = cur.fetchone()
 
     if user and calculate_passhash(user["account_name"], password) == user["passhash"]:
+        memcache().set(cache_key, user, expire=300)  # キャッシュ期限を300秒に設定
         return user
     return None
 
@@ -123,99 +129,77 @@ def calculate_passhash(account_name: str, password: str):
 def get_session_user():
     user = flask.session.get("user")
     if user:
+        # Try to fetch user from cache
+        cache_key = f"user:{user['id']}"
+        cached_user = memcache().get(cache_key)
+        if cached_user:
+            return cached_user
+
+        # If not in cache, fetch from DB
         cur = db().cursor()
         cur.execute("SELECT * FROM `users` WHERE `id` = %s", (user["id"],))
-        return cur.fetchone()
-    return None
+        user_data = cur.fetchone()
 
+        if user_data:
+            # Store in cache for future use
+            memcache().set(cache_key, user_data, expire=60)  # Cache for 60 seconds
+        return user_data
+    return None
 
 def make_posts(results, all_comments=False):
     if not results:
         return []
-    
+
     posts = []
     cursor = db().cursor()
-    
-    # Extract all post IDs and user IDs upfront
+
     post_ids = [post["id"] for post in results]
-    post_user_ids = [post["user_id"] for post in results]
-    
-    # Bulk fetch all users for posts
-    cursor.execute(
-        "SELECT * FROM `users` WHERE `id` IN %s",
-        (post_user_ids,)
-    )
+    post_user_ids = {post["user_id"] for post in results}
+
+    # キャッシュキーを生成
+    cache_key_posts = f"posts:{','.join(map(str, post_ids))}"
+    cached_posts = memcache().get(cache_key_posts)
+    if cached_posts:
+        return cached_posts
+
+    # ユーザー情報を一括取得
+    cursor.execute("SELECT * FROM `users` WHERE `id` IN %s", (list(post_user_ids),))
     users_by_id = {user["id"]: user for user in cursor.fetchall()}
-    
-    # Bulk fetch comment counts for all posts
+
+    # コメント数を一括取得
     cursor.execute(
         "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN %s GROUP BY `post_id`",
         (post_ids,)
     )
     comment_counts = {row["post_id"]: row["count"] for row in cursor.fetchall()}
-    
-    # Bulk fetch comments for all posts
-    if all_comments:
-        cursor.execute(
-            "SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `post_id`, `created_at` DESC",
-            (post_ids,)
-        )
-    else:
-        # For limited comments, we need a more complex query using window functions
-        cursor.execute(
-            """
-            SELECT * FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) as rn
-                FROM `comments` WHERE `post_id` IN %s
-            ) ranked WHERE rn <= 3 ORDER BY `post_id`, `created_at` ASC
-            """,
-            (post_ids,)
-        )
-    
-    # Group comments by post_id
+
+    # コメントを一括取得
+    comment_limit = "LIMIT 3" if not all_comments else ""
+    cursor.execute(
+        f"SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `created_at` DESC {comment_limit}",
+        (post_ids,)
+    )
     comments_by_post = {}
-    comment_user_ids = set()
     for comment in cursor.fetchall():
         post_id = comment["post_id"]
         if post_id not in comments_by_post:
             comments_by_post[post_id] = []
         comments_by_post[post_id].append(comment)
-        comment_user_ids.add(comment["user_id"])
-    
-    # Bulk fetch users for comments
-    if comment_user_ids:
-        cursor.execute(
-            "SELECT * FROM `users` WHERE `id` IN %s",
-            (list(comment_user_ids),)
-        )
-        comment_users = {user["id"]: user for user in cursor.fetchall()}
-    else:
-        comment_users = {}
-    
-    # Assemble posts
+
+    # 投稿を組み立てる
     for post in results:
         post_id = post["id"]
-        user_id = post["user_id"]
-        
-        # Set comment count
         post["comment_count"] = comment_counts.get(post_id, 0)
-        
-        # Set comments with users
-        comments = comments_by_post.get(post_id, [])
-        for comment in comments:
-            comment["user"] = comment_users.get(comment["user_id"])
-        post["comments"] = comments
-        
-        # Set post user
-        post["user"] = users_by_id.get(user_id)
-        
-        # Only include posts from non-deleted users
+        post["comments"] = comments_by_post.get(post_id, [])
+        post["user"] = users_by_id.get(post["user_id"])
+
         if post["user"] and not post["user"]["del_flg"]:
             posts.append(post)
-            
             if len(posts) >= POSTS_PER_PAGE:
                 break
-    
+
+    # キャッシュに保存
+    memcache().set(cache_key_posts, posts, expire=60)
     return posts
 
 
@@ -344,18 +328,29 @@ def get_index():
 
     return flask.render_template("index.html", posts=posts, me=me)
 
-
 @app.route("/@<account_name>")
 def get_user_list(account_name):
-    cursor = db().cursor()
+    cache_key = f"user_list:{account_name}"
+    cached_data = memcache().get(cache_key)
+    if cached_data:
+        return flask.render_template(
+            "user.html",
+            posts=cached_data["posts"],
+            user=cached_data["user"],
+            post_count=cached_data["post_count"],
+            comment_count=cached_data["comment_count"],
+            commented_count=cached_data["commented_count"],
+            me=get_session_user(),
+        )
 
+    cursor = db().cursor()
     cursor.execute(
         "SELECT * FROM `users` WHERE `account_name` = %s AND `del_flg` = 0",
         (account_name,),
     )
     user = cursor.fetchone()
     if user is None:
-        flask.abort(404)  # raises exception
+        flask.abort(404)
 
     cursor.execute(
         "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = %s ORDER BY `created_at` DESC",
@@ -380,7 +375,17 @@ def get_user_list(account_name):
         )
         commented_count = cursor.fetchone()["count"]
 
-    me = get_session_user()
+    memcache().set(
+        cache_key,
+        {
+            "posts": posts,
+            "user": user,
+            "post_count": post_count,
+            "comment_count": comment_count,
+            "commented_count": commented_count,
+        },
+        expire=300,
+    )
 
     return flask.render_template(
         "user.html",
@@ -389,7 +394,7 @@ def get_user_list(account_name):
         post_count=post_count,
         comment_count=comment_count,
         commented_count=commented_count,
-        me=me,
+        me=get_session_user(),
     )
 
 
@@ -404,8 +409,13 @@ def _parse_iso8601(s):
 
 @app.route("/posts")
 def get_posts():
+    max_created_at = flask.request.args.get("max_created_at")
+    cache_key = f"posts:{max_created_at}"
+    cached_posts = memcache().get(cache_key)
+    if cached_posts:
+        return flask.render_template("posts.html", posts=cached_posts)
+
     cursor = db().cursor()
-    max_created_at = flask.request.args["max_created_at"] or None
     if max_created_at:
         max_created_at = _parse_iso8601(max_created_at)
         cursor.execute(
@@ -414,10 +424,12 @@ def get_posts():
         )
     else:
         cursor.execute(
-            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE ORDER BY `created_at` DESC"
+            "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC"
         )
     results = cursor.fetchall()
     posts = make_posts(results)
+
+    memcache().set(cache_key, posts, expire=300)
     return flask.render_template("posts.html", posts=posts)
 
 
