@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import os
 import pathlib
+import pickle
 import re
 import tempfile
 
@@ -94,7 +95,11 @@ def memcache():
     if _mcclient is None:
         conf = config()["memcache"]
         _mcclient = MemcacheClient(
-            conf["address"], no_delay=True, default_noreply=False
+            conf["address"],
+            no_delay=True,
+            default_noreply=False,
+            serializer=pickle.dumps,
+            deserializer=pickle.loads,
         )
     return _mcclient
 
@@ -266,13 +271,15 @@ def nl2br(eval_ctx, value):
         result = Markup(result)
     return result
 
+
 # add cache to static files
 @app.after_request
 def add_cache_control(response):
     # 静的ファイルに対してキャッシュヘッダーを追加
     if response.status_code == 200 and response.mimetype.startswith("image/"):
-        response.headers["Cache-Control"] = "public, max-age=3153600"  
+        response.headers["Cache-Control"] = "public, max-age=3153600"
     return response
+
 
 # endpoints
 
