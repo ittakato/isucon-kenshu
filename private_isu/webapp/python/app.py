@@ -130,39 +130,92 @@ def get_session_user():
 
 
 def make_posts(results, all_comments=False):
+    if not results:
+        return []
+    
     posts = []
     cursor = db().cursor()
-    for post in results:
+    
+    # Extract all post IDs and user IDs upfront
+    post_ids = [post["id"] for post in results]
+    post_user_ids = [post["user_id"] for post in results]
+    
+    # Bulk fetch all users for posts
+    cursor.execute(
+        "SELECT * FROM `users` WHERE `id` IN %s",
+        (post_user_ids,)
+    )
+    users_by_id = {user["id"]: user for user in cursor.fetchall()}
+    
+    # Bulk fetch comment counts for all posts
+    cursor.execute(
+        "SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN %s GROUP BY `post_id`",
+        (post_ids,)
+    )
+    comment_counts = {row["post_id"]: row["count"] for row in cursor.fetchall()}
+    
+    # Bulk fetch comments for all posts
+    if all_comments:
         cursor.execute(
-            "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = %s",
-            (post["id"],),
+            "SELECT * FROM `comments` WHERE `post_id` IN %s ORDER BY `post_id`, `created_at` DESC",
+            (post_ids,)
         )
-        post["comment_count"] = cursor.fetchone()["count"]
-
-        query = (
-            "SELECT * FROM `comments` WHERE `post_id` = %s ORDER BY `created_at` DESC"
+    else:
+        # For limited comments, we need a more complex query using window functions
+        cursor.execute(
+            """
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) as rn
+                FROM `comments` WHERE `post_id` IN %s
+            ) ranked WHERE rn <= 3 ORDER BY `post_id`, `created_at` ASC
+            """,
+            (post_ids,)
         )
-        if not all_comments:
-            query += " LIMIT 3"
-
-        cursor.execute(query, (post["id"],))
-        comments = list(cursor)
+    
+    # Group comments by post_id
+    comments_by_post = {}
+    comment_user_ids = set()
+    for comment in cursor.fetchall():
+        post_id = comment["post_id"]
+        if post_id not in comments_by_post:
+            comments_by_post[post_id] = []
+        comments_by_post[post_id].append(comment)
+        comment_user_ids.add(comment["user_id"])
+    
+    # Bulk fetch users for comments
+    if comment_user_ids:
+        cursor.execute(
+            "SELECT * FROM `users` WHERE `id` IN %s",
+            (list(comment_user_ids),)
+        )
+        comment_users = {user["id"]: user for user in cursor.fetchall()}
+    else:
+        comment_users = {}
+    
+    # Assemble posts
+    for post in results:
+        post_id = post["id"]
+        user_id = post["user_id"]
+        
+        # Set comment count
+        post["comment_count"] = comment_counts.get(post_id, 0)
+        
+        # Set comments with users
+        comments = comments_by_post.get(post_id, [])
         for comment in comments:
-            cursor.execute(
-                "SELECT * FROM `users` WHERE `id` = %s", (comment["user_id"],)
-            )
-            comment["user"] = cursor.fetchone()
-        comments.reverse()
+            comment["user"] = comment_users.get(comment["user_id"])
         post["comments"] = comments
-
-        cursor.execute("SELECT * FROM `users` WHERE `id` = %s", (post["user_id"],))
-        post["user"] = cursor.fetchone()
-
-        if not post["user"]["del_flg"]:
+        
+        # Set post user
+        post["user"] = users_by_id.get(user_id)
+        
+        # Only include posts from non-deleted users
+        if post["user"] and not post["user"]["del_flg"]:
             posts.append(post)
-
-        if len(posts) >= POSTS_PER_PAGE:
-            break
+            
+            if len(posts) >= POSTS_PER_PAGE:
+                break
+    
     return posts
 
 
