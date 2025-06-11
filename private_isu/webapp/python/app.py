@@ -94,21 +94,12 @@ def memcache():
     global _mcclient
     if _mcclient is None:
         conf = config()["memcache"]
-
-        def pickle_serializer(key, value):
-            return pickle.dumps(value), 1  # 1 is a flag to indicate pickled data
-
-        def pickle_deserializer(key, value, flags):
-            if flags == 1:
-                return pickle.loads(value)
-            return value
-
         _mcclient = MemcacheClient(
             conf["address"],
             no_delay=True,
             default_noreply=False,
-            serializer=pickle_serializer,
-            deserializer=pickle_deserializer,
+            serializer=pickle.dumps,
+            deserializer=pickle.loads,
         )
     return _mcclient
 
