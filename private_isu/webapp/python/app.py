@@ -12,6 +12,7 @@ from flask_session import Session
 from jinja2 import pass_eval_context
 from markupsafe import Markup, escape
 from pymemcache.client.base import Client as MemcacheClient
+import hashlib
 
 UPLOAD_LIMIT = 10 * 1024 * 1024  # 10mb
 POSTS_PER_PAGE = 20
@@ -109,13 +110,7 @@ def validate_user(account_name: str, password: str):
 
 
 def digest(src: str):
-    # opensslのバージョンによっては (stdin)= というのがつくので取る
-    out = subprocess.check_output(
-        f"printf %s {shlex.quote(src)} | openssl dgst -sha512 | sed 's/^.*= //'",
-        shell=True,
-        encoding="utf-8",
-    )
-    return out.strip()
+    return hashlib.sha512(src.encode("utf-8")).hexdigest()
 
 
 def calculate_salt(account_name: str):
