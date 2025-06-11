@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import os
 import pathlib
 import re
@@ -102,14 +103,10 @@ def validate_user(account_name: str, password: str):
     return True
 
 
-def digest(src: str):
-    # opensslのバージョンによっては (stdin)= というのがつくので取る
-    out = subprocess.check_output(
-        f"printf %s {shlex.quote(src)} | openssl dgst -sha512 | sed 's/^.*= //'",
-        shell=True,
-        encoding="utf-8",
-    )
-    return out.strip()
+def digest(src: str) -> str:
+    h = hashlib.sha512()
+    h.update(src.encode("utf-8"))
+    return h.hexdigest()
 
 
 def calculate_salt(account_name: str):
