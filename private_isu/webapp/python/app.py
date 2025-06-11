@@ -203,11 +203,13 @@ def nl2br(eval_ctx, value):
         result = Markup(result)
     return result
 
+
 # Cache-Control header for static files
 @app.after_request
 def add_header(response):
     response.headers["Cache-Control"] = "public, max-age=31536000"
     return response
+
 
 # endpoints
 
@@ -461,7 +463,7 @@ def post_comment():
         flask.abort(422)
 
     post_id = flask.request.form["post_id"]
-    if not re.match(r"[0-9]+", post_id):
+    if not post_id.isdigit():
         return "post_idは整数のみです"
     post_id = int(post_id)
 
