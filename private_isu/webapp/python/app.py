@@ -206,6 +206,11 @@ def nl2br(eval_ctx, value):
         result = Markup(result)
     return result
 
+# Cache-Control header for static files
+@app.after_request
+def add_header(response):
+    response.headers["Cache-Control"] = "public, max-age=31536000"
+    return response
 
 # endpoints
 
